@@ -1,0 +1,44 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('conversation_participants', function (Blueprint $table) {
+            $table->id();
+
+            $table->foreignId('conversation_id')->constrained()->cascadeOnDelete();
+            $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+
+            // آخر وقت قرأ فيه هذا المستخدم المحادثة (لحساب عدد الرسائل غير المقروءة)
+            $table->timestamp('last_read_at')->nullable();
+
+            // وقت انضمامه للمحادثة (مفيد للمجموعات عند إضافة عضو لاحقاً)
+            $table->timestamp('joined_at')->useCurrent();
+
+            // هل غادر المحادثة (للمجموعات: تتيح "ترك المجموعة" دون حذف السجل بالكامل)
+            $table->timestamp('left_at')->nullable();
+
+            $table->timestamps();
+
+            // لا يمكن لنفس المستخدم أن يتكرر في نفس المحادثة
+            $table->unique(['conversation_id', 'user_id']);
+            $table->index('user_id');
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('conversation_participants');
+    }
+};
