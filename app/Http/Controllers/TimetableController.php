@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Schedule;
 use App\Models\Section;
+use App\Models\Student;
 use App\Models\Timetable;
 use App\Services\NotificationService;
 use Illuminate\Http\Request;
@@ -224,5 +225,146 @@ class TimetableController extends Controller
             'message' => __('Schedule entry added successfully'),
             'data'    => $schedule->load(['subject', 'teacher.user']),
         ], 201);
+    }
+
+    /**
+     * الطالب يرى جدوله الدراسي (الجدول الزمني لشعبة他已经 enrolled فيه)
+     */
+    public function myTimetable()
+    {
+        $user = auth()->user();
+        $student = $user->student;
+
+        if (!$student) {
+            return response()->json(['message' => __('Student profile not found.')], 404);
+        }
+
+        return response()->json($this->studentTimetablePayload($student));
+    }
+
+    /**
+     * وليّ الأمر يرى البرنامج الدراسي لأحد أبنائه المرتبطين فعلاً بحسابه
+     * GET /api/parent/timetable/{student}
+     */
+    public function childTimetable(Request $request, Student $student)
+    {
+        if ($request->user()->role !== 'parent') {
+            return response()->json(['error' => __('This endpoint is for parents only.')], 403);
+        }
+
+        $parent = $request->user()->parent;
+
+        if (!$parent || $parent->status !== 'approved') {
+            return response()->json(['error' => __('Your account is pending approval or has been rejected.')], 403);
+        }
+
+        if (!$parent->students()->where('id', $student->id)->exists()) {
+            return response()->json(['error' => __('This student is not one of your children.')], 403);
+        }
+
+        return response()->json($this->studentTimetablePayload($student));
+    }
+
+    /**
+     * وليّ الأمر يرى البرنامج الدراسي لكل أبنائه دفعة واحدة
+     * GET /api/parent/timetable
+     */
+    public function childrenTimetables(Request $request)
+    {
+        if ($request->user()->role !== 'parent') {
+            return response()->json(['error' => __('This endpoint is for parents only.')], 403);
+        }
+
+        $parent = $request->user()->parent;
+
+        if (!$parent || $parent->status !== 'approved') {
+            return response()->json(['error' => __('Your account is pending approval or has been rejected.')], 403);
+        }
+
+        $children = $parent->students()->with('user')->get();
+
+        $result = $children->map(function (Student $student) {
+            $payload = $this->studentTimetablePayload($student);
+
+            return [
+                'student_id' => $student->id,
+                'student_name' => $student->user->name ?? null,
+                'message' => $payload['message'],
+                'timetable' => $payload['data'],
+            ];
+        })->values();
+
+        return response()->json([
+            'message' => __('Children timetables retrieved successfully'),
+            'data' => $result,
+        ]);
+    }
+
+    /**
+     * منطق مشترك: جدول الشعبة الحالية لطالب معيّن حسب آخر تسجيل مقبول له.
+     * تُستخدم من قِبل الطالب نفسه (myTimetable) ووليّ أمره (childTimetable/childrenTimetables).
+     */
+    private function studentTimetablePayload(Student $student): array
+    {
+        $enrollment = $student->enrollments()
+            ->where('status', 'approved')
+            ->latest()
+            ->first();
+
+        if (!$enrollment || !$enrollment->section_id) {
+            return [
+                'message' => __('This student is not enrolled in any section yet.'),
+                'data' => null,
+            ];
+        }
+
+        $timetable = Timetable::where('section_id', $enrollment->section_id)
+            ->with([
+                'section.level',
+                'section.program',
+                'schedules.subject',
+                'schedules.teacher.user',
+            ])
+            ->latest()
+            ->first();
+
+        if (!$timetable) {
+            return [
+                'message' => __('No timetable found for this section.'),
+                'data' => null,
+            ];
+        }
+
+        return [
+            'message' => __('Timetable retrieved successfully'),
+            'data' => $timetable,
+        ];
+    }
+
+    /**
+     * المعلم يرى جدول حصصه الأسبوعي
+     */
+    public function mySchedule()
+    {
+        $user = auth()->user();
+        $teacher = $user->teacher;
+
+        if (!$teacher) {
+            return response()->json(['message' => __('Teacher profile not found.')], 404);
+        }
+
+        $schedules = Schedule::where('teacher_id', $teacher->id)
+            ->with([
+                'subject',
+                'timetable.section.level',
+                'timetable.section.program',
+            ])
+            ->get()
+            ->groupBy('day');
+
+        return response()->json([
+            'message' => __('Schedule retrieved successfully'),
+            'data' => $schedules,
+        ]);
     }
 }

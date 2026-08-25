@@ -53,6 +53,11 @@ class Teacher extends Model
         return $this->hasMany(Homework::class);
     }
 
+    public function studentNotes()
+    {
+        return $this->hasMany(StudentNote::class);
+    }
+
     /**
      * طلاب هذا المدرّس الفعليون حسب جدوله الحالي (Schedule)، عبر المسار:
      * schedules -> timetable -> section -> student_enrollments (status=approved) -> student
@@ -130,5 +135,12 @@ class Teacher extends Model
     public function teaches(Student $student): bool
     {
         return $this->scheduledStudents()->contains('id', $student->id);
+    }
+
+    public function getProfileImageAttribute($value)
+    {
+        if (!$value) return null;
+        if (str_starts_with($value, 'http')) return $value;
+        return url('/storage/' . $value);
     }
 }

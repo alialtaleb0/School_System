@@ -11,6 +11,7 @@
 
 namespace App\Services;
 
+use App\Models\AbsenceJustification;
 use App\Models\Attendance;
 use App\Models\Certificate;
 use App\Models\Conversation;
@@ -22,6 +23,8 @@ use App\Models\Message;
 use App\Models\ParentModel;
 use App\Models\Section;
 use App\Models\StudentEnrollment;
+use App\Models\StudentNote;
+use App\Models\StudentNoteReply;
 use App\Models\Teacher;
 use App\Models\User;
 use App\Models\WalletTransaction;
@@ -366,5 +369,136 @@ class NotificationService
                 data: $data,
             );
         }
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // 1️⃣3️⃣ طلب تبرير غياب جديد (يصل لمعلمي الطالب والأدمن)
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * تُستدعى فور تقديم طلب تبرير غياب جديد (حالة pending)، لإشعار كل
+     * معلمي الطالب الفعليين (حسب جدوله) وكل حسابات الأدمن بوجود طلب
+     * جديد بانتظار المراجعة.
+     */
+    public function absenceJustificationRequested(AbsenceJustification $justification): void
+    {
+        $justification->loadMissing('student.user');
+
+        $studentName = $justification->student->user->name ?? 'طالب';
+        $body = "قدّم الطالب {$studentName} طلب تبرير غياب بتاريخ {$justification->absence_date->toDateString()}، بانتظار المراجعة.";
+
+        $recipients = $justification->student->scheduledTeachers()
+            ->map(fn ($teacher) => $teacher->user)
+            ->filter();
+
+        $admins = User::where('role', 'admin')->get();
+
+        $this->sendToMany(
+            $recipients->merge($admins)->unique('id'),
+            title: 'طلب تبرير غياب جديد',
+            body: $body,
+            type: 'absence_justification_requested',
+            data: ['absence_justification_id' => $justification->id, 'student_id' => $justification->student_id],
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // 1️⃣4️⃣ قبول/رفض طلب تبرير غياب
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * تُستدعى بعد مراجعة طلب تبرير غياب (قبول أو رفض)، لإشعار الطالب
+     * نفسه ووليّ أمره معاً بنتيجة المراجعة.
+     */
+    public function absenceJustificationReviewed(AbsenceJustification $justification): void
+    {
+        $justification->loadMissing(['student.user', 'student.parent.user']);
+
+        $isApproved = $justification->status === 'approved';
+        $date = $justification->absence_date->toDateString();
+
+        $body = $isApproved
+            ? "تم قبول طلب تبرير غيابك بتاريخ {$date}."
+            : "تم رفض طلب تبرير غيابك بتاريخ {$date}." . ($justification->review_note ? " السبب: {$justification->review_note}" : '');
+
+        $this->send(
+            $justification->student->user ?? null,
+            title: $isApproved ? 'تم قبول طلب تبرير الغياب' : 'تم رفض طلب تبرير الغياب',
+            body: $body,
+            type: $isApproved ? 'absence_justification_approved' : 'absence_justification_rejected',
+            data: ['absence_justification_id' => $justification->id],
+        );
+
+        $this->send(
+            $justification->student->parent->user ?? null,
+            title: $isApproved ? 'تم قبول طلب تبرير غياب ابنك/ابنتك' : 'تم رفض طلب تبرير غياب ابنك/ابنتك',
+            body: $body,
+            type: $isApproved ? 'absence_justification_approved' : 'absence_justification_rejected',
+            data: ['absence_justification_id' => $justification->id, 'student_id' => $justification->student_id],
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // 1️⃣5️⃣ ملاحظة جديدة من معلم عن طالب
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * تُستدعى بعد إضافة ملاحظة جديدة، لإشعار الطالب نفسه ووليّ أمره معاً.
+     */
+    public function studentNoteCreated(StudentNote $note): void
+    {
+        $note->loadMissing(['student.user', 'student.parent.user', 'teacher.user']);
+
+        $teacherName = $note->teacher->user->name ?? 'المعلم';
+        $body = $note->title
+            ? "أضاف {$teacherName} ملاحظة جديدة: {$note->title}"
+            : "أضاف {$teacherName} ملاحظة جديدة.";
+
+        $this->send(
+            $note->student->user ?? null,
+            title: 'ملاحظة جديدة من المعلم',
+            body: $body,
+            type: 'student_note_created',
+            data: ['student_note_id' => $note->id],
+        );
+
+        $this->send(
+            $note->student->parent->user ?? null,
+            title: 'ملاحظة جديدة من معلم ابنك/ابنتك',
+            body: $body,
+            type: 'student_note_created',
+            data: ['student_note_id' => $note->id, 'student_id' => $note->student_id],
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // 1️⃣6️⃣ رد جديد على ملاحظة
+    // ────────────────────────────────────────────────────────────
+
+    /**
+     * تُستدعى بعد إضافة رد جديد على ملاحظة، لإشعار كل أطراف الخيط
+     * (المعلم كاتب الملاحظة، الطالب، وليّ أمره) عدا من كتب الرد نفسه.
+     */
+    public function studentNoteReplied(StudentNoteReply $reply): void
+    {
+        $reply->loadMissing(['note.student.user', 'note.student.parent.user', 'note.teacher.user', 'author']);
+
+        $note = $reply->note;
+        $replierName = $reply->author->name ?? 'مستخدم';
+        $preview = \Illuminate\Support\Str::limit($reply->body, 60);
+
+        $recipients = collect([
+            $note->teacher->user ?? null,
+            $note->student->user ?? null,
+            $note->student->parent->user ?? null,
+        ])->filter(fn ($user) => $user && $user->id !== $reply->user_id)->unique('id');
+
+        $this->sendToMany(
+            $recipients,
+            title: "رد جديد من {$replierName}",
+            body: $preview,
+            type: 'student_note_replied',
+            data: ['student_note_id' => $note->id, 'reply_id' => $reply->id],
+        );
     }
 }

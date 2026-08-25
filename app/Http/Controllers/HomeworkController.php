@@ -81,13 +81,22 @@ class HomeworkController extends Controller
         ], 201);
     }
 
+    /**
+     * آخر تسجيل مقبول للطالب (يحدد المرحلة/الشعبة الحالية له).
+     */
+    private function currentApprovedEnrollment(Student $student)
+    {
+        return $student->enrollments()->where('status', 'approved')->latest()->first();
+    }
+
     public function show(Homework $homework)
     {
         $user = auth()->user();
 
         if ($user->role === 'student') {
             $student = $user->student;
-            if (!$student || $student->level_id !== $homework->level_id || $student->section_id !== $homework->section_id) {
+            $enrollment = $student ? $this->currentApprovedEnrollment($student) : null;
+            if (!$enrollment || $enrollment->level_id !== $homework->level_id || $enrollment->section_id !== $homework->section_id) {
                 return response()->json(['error' => __('Unauthorized')], 403);
             }
         } elseif ($user->role === 'teacher' && $user->teacher->id !== $homework->teacher_id) {
@@ -164,9 +173,14 @@ class HomeworkController extends Controller
             return response()->json(['error' => __('Student profile not found')], 404);
         }
 
+        $enrollment = $this->currentApprovedEnrollment($student);
+        if (!$enrollment) {
+            return response()->json(['error' => __('No active enrollment found')], 404);
+        }
+
         $homeworks = Homework::with(['subject', 'teacher.user', 'level', 'section'])
-            ->where('level_id', $student->enrollments()->latest()->first()->level_id)
-            ->where('section_id', $student->enrollments()->latest()->first()->section_id)
+            ->where('level_id', $enrollment->level_id)
+            ->where('section_id', $enrollment->section_id)
             ->get();
 
         return response()->json([

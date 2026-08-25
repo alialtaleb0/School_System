@@ -11,6 +11,7 @@ use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 class ParentController extends Controller
 {
@@ -117,7 +118,39 @@ class ParentController extends Controller
     }
 
     /**
-     * 3️⃣ جلب درجات الأبناء حصراً (مشروط بالموافقة)
+     * 3️⃣ عرض قائمة الأبناء المسجلين وبياناتهم الأساسية (مشروط بالموافقة)
+     * GET /api/parent/children
+     */
+    public function myChildren()
+    {
+        if (auth()->user()->role !== 'parent') {
+            return response()->json(['error' => __('Unauthorized.')], 403);
+        }
+
+        $parent = auth()->user()->parent;
+
+        if (!$parent || $parent->status !== 'approved') {
+            return response()->json(['error' => __('Your account is pending approval or has been rejected.')], 403);
+        }
+
+        $children = $parent->students()
+            ->with([
+                'user',
+                'enrollments' => fn ($query) => $query->latest(),
+                'enrollments.level',
+                'enrollments.section',
+                'enrollments.program',
+            ])
+            ->get();
+
+        return response()->json([
+            'message' => __('Children retrieved successfully'),
+            'data' => $children,
+        ]);
+    }
+
+    /**
+     * 4️⃣ جلب درجات الأبناء حصراً (مشروط بالموافقة)
      * GET /api/parent/grades
      */
     public function getChildrenGrades()
@@ -141,7 +174,7 @@ class ParentController extends Controller
     }
 
     /**
-     * 4️⃣ تتبع غياب الأبناء بناءً على الأيام المفقودة (مشروط بالموافقة)
+     * 5️⃣ تتبع غياب الأبناء بناءً على الأيام المفقودة (مشروط بالموافقة)
      * GET /api/parent/attendance
      */
     public function getChildrenAttendance()
@@ -191,5 +224,186 @@ class ParentController extends Controller
         }
 
         return response()->json(['data' => $result], 200);
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // إدارة حسابات أولياء الأمور من قِبل الأدمن (Admin Parent Accounts Management)
+    // ══════════════════════════════════════════════════════════════
+
+    /**
+     * 6️⃣ الإضافة المباشرة من الأدمن لحساب أب جديد (يُقبل فوراً، مع إمكانية ربط أبناء مباشرة)
+     * POST /api/parents
+     */
+    public function store(Request $request)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json(['error' => __('Only admins can create parent accounts directly')], 403);
+        }
+
+        $data = $request->validate([
+            'first_name' => 'required|string|max:255',
+            'last_name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users,email',
+            'phone' => 'nullable|string|max:20',
+            'address' => 'nullable|string|max:255',
+            'password' => 'required|string|min:8',
+            'student_ids' => 'nullable|array',
+            'student_ids.*' => 'exists:students,id',
+        ]);
+
+        $user = User::create([
+            'first_name' => $data['first_name'],
+            'last_name' => $data['last_name'],
+            'email' => $data['email'],
+            'phone' => $data['phone'] ?? null,
+            'address' => $data['address'] ?? null,
+            'password' => Hash::make($data['password']),
+            'role' => 'parent',
+        ]);
+
+        $parent = ParentModel::create([
+            'user_id' => $user->id,
+            'status' => 'approved',
+            'phone_number' => $data['phone'] ?? null,
+            'address' => $data['address'] ?? null,
+        ]);
+
+        if (!empty($data['student_ids'])) {
+            Student::whereIn('id', $data['student_ids'])->update(['parent_id' => $parent->id]);
+        }
+
+        return response()->json([
+            'message' => __('Parent account created successfully by admin'),
+            'data' => $parent->load(['user', 'students.user', 'wallet']),
+        ], 201);
+    }
+
+    /**
+     * 7️⃣ عرض جميع حسابات أولياء الأمور مع بحث وفلترة (الأدمن فقط)
+     * GET /api/admin/parents
+     */
+    public function index(Request $request)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json(['error' => __('Only admins can view parent accounts')], 403);
+        }
+
+        $data = $request->validate([
+            'search' => 'nullable|string|max:255',
+            'status' => 'nullable|in:pending,approved,rejected',
+        ]);
+
+        $query = ParentModel::with(['user', 'students.user']);
+
+        if ($data['search'] ?? null) {
+            $search = $data['search'];
+            $query->whereHas('user', function ($q) use ($search) {
+                $q->where('first_name', 'like', "%{$search}%")
+                  ->orWhere('last_name', 'like', "%{$search}%")
+                  ->orWhere('email', 'like', "%{$search}%");
+            });
+        }
+
+        if ($data['status'] ?? null) {
+            $query->where('status', $data['status']);
+        }
+
+        $parents = $query->latest()->get();
+
+        return response()->json([
+            'message' => __('Parent accounts retrieved successfully'),
+            'data' => $parents,
+        ]);
+    }
+
+    /**
+     * 8️⃣ عرض حساب أب محدد بكل تفاصيله (الأدمن فقط)
+     * GET /api/admin/parents/{parent}
+     */
+    public function show(ParentModel $parent)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json(['error' => __('Only admins can view parent account details')], 403);
+        }
+
+        return response()->json([
+            'message' => __('Parent account retrieved successfully'),
+            'data' => $parent->load(['user', 'students.user', 'wallet']),
+        ]);
+    }
+
+    /**
+     * 9️⃣ التعديل المباشر من الأدمن (بيانات الحساب + إعادة ربط الأبناء)
+     * PUT/PATCH /api/admin/parents/{parent}
+     */
+    public function update(Request $request, ParentModel $parent)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json(['error' => __('Only admins can update parent accounts directly')], 403);
+        }
+
+        $data = $request->validate([
+            'first_name' => 'nullable|string|max:255',
+            'last_name' => 'nullable|string|max:255',
+            'email' => 'nullable|string|email|max:255|unique:users,email,' . $parent->user_id,
+            'phone' => 'nullable|string|max:20',
+            'address' => 'nullable|string|max:255',
+            'password' => 'nullable|string|min:8',
+            'status' => 'nullable|in:pending,approved,rejected',
+            'student_ids' => 'nullable|array',
+            'student_ids.*' => 'exists:students,id',
+        ]);
+
+        $parent->user->update(array_filter([
+            'first_name' => $data['first_name'] ?? null,
+            'last_name' => $data['last_name'] ?? null,
+            'email' => $data['email'] ?? null,
+            'phone' => $data['phone'] ?? null,
+            'address' => $data['address'] ?? null,
+            'password' => isset($data['password']) ? Hash::make($data['password']) : null,
+        ]));
+
+        $parent->update(array_filter([
+            'phone_number' => $data['phone'] ?? null,
+            'address' => $data['address'] ?? null,
+            'status' => $data['status'] ?? null,
+        ]));
+
+        // إعادة ربط الأبناء فقط إذا أرسل الأدمن student_ids صراحةً (حتى لو مصفوفة فارغة لفكّ الربط عن الجميع)
+        if (array_key_exists('student_ids', $data)) {
+            Student::where('parent_id', $parent->id)->update(['parent_id' => null]);
+            Student::whereIn('id', $data['student_ids'] ?? [])->update(['parent_id' => $parent->id]);
+        }
+
+        return response()->json([
+            'message' => __('Parent account updated successfully by admin'),
+            'data' => $parent->load(['user', 'students.user', 'wallet']),
+        ]);
+    }
+
+    /**
+     * 🔟 الحذف المباشر من الأدمن (يفكّ ربط الأبناء تلقائياً بدل حذفهم)
+     * DELETE /api/admin/parents/{parent}
+     */
+    public function destroy(ParentModel $parent)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json(['error' => __('Only admins can delete parent accounts directly')], 403);
+        }
+
+        $parent->loadMissing('wallet');
+
+        if ($parent->wallet && (float) $parent->wallet->balance > 0) {
+            return response()->json([
+                'error' => __('This parent wallet still has a positive balance. Withdraw or transfer it before deleting the account.'),
+            ], 422);
+        }
+
+        // حذف حساب المستخدم يحذف سجل الأب تلقائياً (cascade)، ويفكّ ربط أبنائه (nullOnDelete) دون حذفهم
+        $parent->user->delete();
+
+        return response()->json([
+            'message' => __('Parent account deleted successfully by admin'),
+        ]);
     }
 }

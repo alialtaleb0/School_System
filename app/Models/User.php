@@ -71,6 +71,17 @@ public function parent()
         $this->forceFill(['last_seen_at' => now()])->saveQuietly();
     }
 
+    public function getProfileImageUrlAttribute(): ?string
+    {
+        if ($this->student && $this->student->profile_image) {
+            return $this->student->profile_image;
+        }
+        if ($this->teacher && $this->teacher->profile_image) {
+            return $this->teacher->profile_image;
+        }
+        return null;
+    }
+
 
 
 
@@ -84,6 +95,7 @@ public function parent()
     protected $appends = [
         'name',
         'is_online',
+        'profile_image_url',
     ];
 
     /**
@@ -100,6 +112,7 @@ public function parent()
         'password',
         'role',
         'fcm_token',
+        'email_verified_at',
     ];
 
     /**

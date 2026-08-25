@@ -133,16 +133,35 @@ class AttendanceController extends Controller
     }
 
     /**
+     * التأكد أن المستخدم الحالي مسموح له بمشاهدة سجل هذا الطالب:
+     * - الطالب: فقط سجله الخاص
+     * - ولي الأمر: فقط سجلات أبنائه المرتبطين به
+     * - الأدمن/المعلم: بدون قيود إضافية هنا
+     */
+    private function ensureCanViewStudentAttendance(Student $student)
+    {
+        $user = auth()->user();
+
+        if ($user->role === 'student' && $user->student->id !== $student->id) {
+            return response()->json(['error' => __('Unauthorized')], 403);
+        }
+
+        if ($user->role === 'parent' && (!$user->parent || $student->parent_id !== $user->parent->id)) {
+            return response()->json(['error' => __('Unauthorized')], 403);
+        }
+
+        return null;
+    }
+
+    /**
      * عرض سجل الحضور لطالب محدد
      */
     public function studentAttendance(Request $request, $id)
     {
         $student = Student::findOrFail($id);
 
-        if (auth()->user()->role === 'student' && auth()->user()->student->id !== $student->id) {
-            return response()->json([
-                'error' => __('Unauthorized')
-            ], 403);
+        if ($unauthorized = $this->ensureCanViewStudentAttendance($student)) {
+            return $unauthorized;
         }
 
         $data = $request->validate([
@@ -170,10 +189,8 @@ class AttendanceController extends Controller
     {
         $student = Student::findOrFail($id);
 
-        if (auth()->user()->role === 'student' && auth()->user()->student->id !== $student->id) {
-            return response()->json([
-                'error' => __('Unauthorized')
-            ], 403);
+        if ($unauthorized = $this->ensureCanViewStudentAttendance($student)) {
+            return $unauthorized;
         }
 
         $attendance = $student->attendance()

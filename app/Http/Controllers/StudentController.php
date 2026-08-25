@@ -11,6 +11,7 @@ use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 
 class StudentController extends Controller
 {
@@ -130,8 +131,10 @@ class StudentController extends Controller
      */
     public function index(Request $request)
     {
+        $user = auth()->user();
+
         // التحقق من الصلاحيات: الأدمن والمعلم وولي الأمر
-        if (!in_array(auth()->user()->role, ['admin', 'teacher', 'parent'])) {
+        if (!in_array($user->role, ['admin', 'teacher', 'parent'])) {
             return response()->json([
                 'error' => __('Only admins, teachers and parents can view students')
             ], 403);
@@ -147,6 +150,21 @@ class StudentController extends Controller
         ]);
 
         $query = Student::with('user', 'enrollments', 'attendance', 'grades');
+
+        // 🔒 التقييد: المعلم يرى طلابه الفعليين فقط، وولي الأمر يرى أبناءه فقط
+        if ($user->role === 'teacher') {
+            if (!$user->teacher) {
+                return response()->json(['error' => __('No teacher profile linked to your account.')], 403);
+            }
+
+            $query->whereIn('id', $user->teacher->scheduledStudents()->pluck('id'));
+        } elseif ($user->role === 'parent') {
+            if (!$user->parent || $user->parent->status !== 'approved') {
+                return response()->json(['error' => __('Your account is pending approval or has been rejected.')], 403);
+            }
+
+            $query->where('parent_id', $user->parent->id);
+        }
 
         // 🔍 البحث بالاسم الأول أو الأخير أو البريد الإلكتروني
         if ($data['search'] ?? null) {
@@ -203,11 +221,31 @@ class StudentController extends Controller
         $student = Student::with([
             'user',
             'enrollments.level',
-            'enrollments.section'
+            'enrollments.section',
+            'enrollments.program',
+            'grades.exam.subject',
+            'attendance' => fn ($query) => $query->latest('date')->limit(30),
+            'homeworkSubmissions.homework.subject',
+            'certificates',
         ])->findOrFail($id);
 
-        // التحقق: الطالب يرى بياناته فقط، الأدمن يرى الجميع
-        if (auth()->user()->role === 'student' && auth()->user()->id !== $student->user_id) {
+        $user = auth()->user();
+
+        // التحقق: الطالب يرى بياناته فقط، المعلم يرى طلابه الفعليين فقط،
+        // وليّ الأمر يرى أبناءه فقط، والأدمن يرى الجميع
+        $isAuthorized = match (true) {
+            $user->role === 'admin' => true,
+            $user->role === 'student' => $user->id === $student->user_id,
+            $user->role === 'teacher' => (bool) ($user->teacher && $user->teacher->teaches($student)),
+            $user->role === 'parent' => (bool) (
+                $user->parent
+                && $user->parent->status === 'approved'
+                && $student->parent_id === $user->parent->id
+            ),
+            default => false,
+        };
+
+        if (! $isAuthorized) {
             return response()->json([
                 'error' => __('Unauthorized')
             ], 403);
@@ -216,6 +254,75 @@ class StudentController extends Controller
         return response()->json([
             'message' => __('Student retrieved successfully'),
             'data' => $student
+        ]);
+    }
+
+    /**
+     * 4️⃣ الأدمن يعدّل بيانات طالب موجود مباشرة
+     * PUT/PATCH /api/students/{id}
+     */
+    public function update(Request $request, $id)
+    {
+        if (auth()->user()->role !== 'admin') {
+            return response()->json([
+                'error' => __('Only admins can update students')
+            ], 403);
+        }
+
+        $student = Student::with('user')->findOrFail($id);
+
+        $data = $request->validate([
+            'first_name' => 'nullable|string|max:255',
+            'last_name' => 'nullable|string|max:255',
+            'email' => 'nullable|string|email|max:255|unique:users,email,' . $student->user_id,
+            'phone' => 'nullable|string|max:20',
+            'address' => 'nullable|string|max:255',
+            'password' => 'nullable|string|min:8',
+            'student_number' => 'nullable|string|unique:students,student_number,' . $student->id,
+            'date_of_birth' => 'nullable|date',
+            'parent_id' => 'nullable|exists:parents,id',
+            'profile_image' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+        ]);
+
+        $student->user->update(array_filter([
+            'first_name' => $data['first_name'] ?? null,
+            'last_name' => $data['last_name'] ?? null,
+            'email' => $data['email'] ?? null,
+            'phone' => $data['phone'] ?? null,
+            'address' => $data['address'] ?? null,
+            'password' => isset($data['password']) ? Hash::make($data['password']) : null,
+        ]));
+
+        $studentUpdates = [];
+
+        if (array_key_exists('student_number', $data)) {
+            $studentUpdates['student_number'] = $data['student_number'];
+        }
+
+        if (array_key_exists('date_of_birth', $data)) {
+            $studentUpdates['date_of_birth'] = $data['date_of_birth'];
+        }
+
+        // تُحدَّث فقط إذا أرسلها الأدمن صراحةً، حتى لو null (لفكّ ربط الطالب عن وليّ أمره)
+        if (array_key_exists('parent_id', $data)) {
+            $studentUpdates['parent_id'] = $data['parent_id'];
+        }
+
+        if ($request->hasFile('profile_image')) {
+            $oldImage = $student->getRawOriginal('profile_image');
+            if ($oldImage) {
+                Storage::disk('public')->delete($oldImage);
+            }
+            $studentUpdates['profile_image'] = $request->file('profile_image')->store('students/profile_images', 'public');
+        }
+
+        if (!empty($studentUpdates)) {
+            $student->update($studentUpdates);
+        }
+
+        return response()->json([
+            'message' => __('Student updated successfully'),
+            'data' => $student->fresh(['user', 'enrollments.level', 'enrollments.section']),
         ]);
     }
 
@@ -349,6 +456,10 @@ class StudentController extends Controller
     {
         $user = auth()->user();
 
+        if (!$user->student) {
+            return response()->json(['error' => __('Student profile not found')], 404);
+        }
+
         return response()->json([
             'message' => __('Your enrollments retrieved successfully'),
             'data' => $user->student->enrollments()
@@ -365,6 +476,10 @@ class StudentController extends Controller
     public function cancel($id)
     {
         $user = auth()->user();
+
+        if (!$user->student) {
+            return response()->json(['error' => __('Student profile not found')], 404);
+        }
 
         $enrollment = StudentEnrollment::where('id', $id)
             ->where('student_id', $user->student->id)

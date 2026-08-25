@@ -47,6 +47,10 @@ class HomeworkSubmissionController extends Controller
 
         $student = auth()->user()->student;
 
+        if (!$student) {
+            return response()->json(['error' => __('Student profile not found')], 404);
+        }
+
         $existing = HomeworkSubmission::where('homework_id', $homework->id)
             ->where('student_id', $student->id)
             ->first();

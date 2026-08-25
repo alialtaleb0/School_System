@@ -5,7 +5,10 @@ use App\Http\Controllers\ConversationController;
 use App\Http\Controllers\MessageController;
 
 
+use App\Http\Controllers\AbsenceJustificationController;
+use App\Http\Controllers\StudentNoteController;
 use App\Http\Controllers\AttendanceController;
+use App\Http\Controllers\AttendanceReportController;
 use App\Http\Controllers\CertificateController;
 use App\Http\Controllers\ExamController;
 use App\Http\Controllers\LevelController;
@@ -32,10 +35,17 @@ use Illuminate\Support\Facades\Route;
 // Public Routes (بدون توثيق)
 Route::post('register', [UserController::class, 'register']);
 Route::post('login', [UserController::class, 'login']);
+Route::post('verify-email', [UserController::class, 'verifyEmail']);
+Route::post('resend-verification-code', [UserController::class, 'resendVerificationCode']);
+Route::post('forgot-password', [UserController::class, 'forgotPassword']);
+Route::post('verify-reset-code', [UserController::class, 'verifyResetCode']);
+Route::post('reset-password', [UserController::class, 'resetPassword']);
 
 Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
+
+Route::middleware('auth:sanctum')->post('/update-profile', [UserController::class, 'updateProfile']);
 
 Route::middleware('auth:sanctum')->get('/test', function () {
     return auth()->user();
@@ -87,8 +97,8 @@ Route::apiResource('/sections', SectionController::class)->except(['create', 'ed
 
 
     // 📌 Timetable endpoints
-
-
+    Route::get('/my-timetable', [TimetableController::class, 'myTimetable']);
+    Route::get('/my-schedule', [TimetableController::class, 'mySchedule']);
 
     Route::apiResource('/timetables', TimetableController::class)->except(['create', 'edit']);
     Route::get('/timetables/{id}/schedules', [TimetableController::class, 'schedules']);
@@ -105,6 +115,7 @@ Route::apiResource('/sections', SectionController::class)->except(['create', 'ed
     Route::get('/students', [StudentController::class, 'index']); // عرض جميع الطلاب
     Route::post('/students', [StudentController::class, 'store']); // إضافة طالب جديد
     Route::get('/students/{id}', [StudentController::class, 'show']); // عرض طالب محدد
+    Route::match(['put', 'patch'], '/students/{id}', [StudentController::class, 'update']); // تعديل بيانات طالب
     Route::delete('/students/{id}', [StudentController::class, 'destroy']); // حذف طالب
 
     // 📌 Admin Enrollment Approval endpoints
@@ -204,9 +215,20 @@ Route::middleware('auth:sanctum')->group(function () {
     // 2. مسار خاص بالأدمن للموافقة أو الرفض على الحساب (يمرر id الأب في الرابط)
     Route::post('admin/parents/{id}/review', [ParentController::class, 'reviewProfile']);
 
+    // 2.1. إدارة كاملة لحسابات أولياء الأمور من قِبل الأدمن (عرض/تعديل/حذف مباشر)
+    Route::get('admin/parents', [ParentController::class, 'index']);
+    Route::get('admin/parents/{parent}', [ParentController::class, 'show']);
+    Route::match(['put', 'patch'], 'admin/parents/{parent}', [ParentController::class, 'update']);
+    Route::delete('admin/parents/{parent}', [ParentController::class, 'destroy']);
+
     // 3. لوحة تحكم الأب (تشتغل تلقائياً فقط بعد الـ approve من الأدمن)
+    Route::get('parent/children', [ParentController::class, 'myChildren']);
     Route::get('parent/grades', [ParentController::class, 'getChildrenGrades']);
     Route::get('parent/attendance', [ParentController::class, 'getChildrenAttendance']);
+
+    // 4. متابعة البرنامج الدراسي للأبناء (يجب تعريف المسار العام قبل مسار {student})
+    Route::get('parent/timetable', [TimetableController::class, 'childrenTimetables']);
+    Route::get('parent/timetable/{student}', [TimetableController::class, 'childTimetable']);
 
 });
 
@@ -479,3 +501,63 @@ Route::middleware('auth:sanctum')->prefix('notifications')->group(function () {
 
 // 📌 تسجيل FCM token للإشعارات push (تعمل حتى لو التطبيق مغلق)
 Route::middleware('auth:sanctum')->post('/fcm-token', [NotificationController::class, 'registerFcmToken']);
+
+// ══════════════════════════════════════════════════════════════
+// ملف: routes/api.php
+// طلبات تبرير الغياب (Absence Justifications) - بإذن الله تعالى
+// ══════════════════════════════════════════════════════════════
+
+Route::middleware('auth:sanctum')->group(function () {
+
+    // 📌 الطالب/وليّ الأمر — تقديم طلب تبرير غياب جديد
+    Route::post('/absence-justifications', [AbsenceJustificationController::class, 'store']);
+
+    // 📌 الطالب/وليّ الأمر — عرض طلباته الخاصة
+    Route::get('/my-absence-justifications', [AbsenceJustificationController::class, 'myRequests']);
+
+    // 📌 المعلم/الأدمن — عرض الطلبات الواردة (مقيّدة بطلاب المعلم فعلياً)
+    Route::get('/absence-justifications', [AbsenceJustificationController::class, 'index']);
+
+    // 📌 عرض تفاصيل طلب واحد (صاحبه / معلمه / الأدمن)
+    Route::get('/absence-justifications/{id}', [AbsenceJustificationController::class, 'show']);
+
+    // 📌 المعلم/الأدمن — قبول أو رفض الطلب
+    Route::match(['put', 'patch'], '/absence-justifications/{id}/approve', [AbsenceJustificationController::class, 'approve']);
+    Route::match(['put', 'patch'], '/absence-justifications/{id}/reject', [AbsenceJustificationController::class, 'reject']);
+
+    // 📌 حذف طلب (صاحبه طالما لا يزال pending، أو الأدمن في أي وقت)
+    Route::delete('/absence-justifications/{id}', [AbsenceJustificationController::class, 'destroy']);
+});
+
+// ══════════════════════════════════════════════════════════════
+// ملف: routes/api.php
+// ملاحظات المعلمين عن الطلاب والرد عليها (Student Notes) - بإذن الله تعالى
+// ══════════════════════════════════════════════════════════════
+
+Route::middleware('auth:sanctum')->group(function () {
+
+    // 📌 المعلم — كتابة ملاحظة جديدة عن أحد طلابه الفعليين
+    Route::post('/student-notes', [StudentNoteController::class, 'store']);
+
+    // 📌 عرض الملاحظات (مقيّدة حسب الدور: معلم/وليّ أمر/طالب/أدمن)
+    Route::get('/student-notes', [StudentNoteController::class, 'index']);
+
+    // 📌 عرض ملاحظة واحدة مع كامل خيط الردود عليها
+    Route::get('/student-notes/{id}', [StudentNoteController::class, 'show']);
+
+    // 📌 الرد على ملاحظة
+    Route::post('/student-notes/{id}/replies', [StudentNoteController::class, 'storeReply']);
+
+    // 📌 حذف ملاحظة (كاتبها فقط أو الأدمن)
+    Route::delete('/student-notes/{id}', [StudentNoteController::class, 'destroy']);
+});
+
+// ══════════════════════════════════════════════════════════════
+// ملف: routes/api.php
+// تقارير الحضور والغياب (Attendance Reports) - بإذن الله تعالى
+// ══════════════════════════════════════════════════════════════
+
+Route::middleware(['auth:sanctum'])->prefix('admin')->group(function () {
+    // 📌 الأدمن — تقرير حضور وغياب شامل (فلترة اختيارية: from, to, section_id, level_id)
+    Route::get('/reports/attendance', [AttendanceReportController::class, 'summary']);
+});

@@ -29,6 +29,16 @@ class Student extends Model
         return $this->hasMany(Attendance::class);
     }
 
+    public function absenceJustifications()
+    {
+        return $this->hasMany(AbsenceJustification::class);
+    }
+
+    public function teacherNotes()
+    {
+        return $this->hasMany(StudentNote::class);
+    }
+
     public function grades()
     {
         return $this->hasMany(Grade::class);
@@ -49,10 +59,17 @@ public function parent() {
     return $this->belongsTo(ParentModel::class, 'parent_id');
 }
 
-public function certificates()
-{
-    return $this->hasMany(\App\Models\Certificate::class);
-}
+    public function certificates()
+    {
+        return $this->hasMany(\App\Models\Certificate::class);
+    }
+
+    public function getProfileImageAttribute($value)
+    {
+        if (!$value) return null;
+        if (str_starts_with($value, 'http')) return $value;
+        return url('/storage/' . $value);
+    }
 
     public function homeworkSubmissions()
     {

@@ -18,11 +18,55 @@ class GradeController extends Controller
     }
 
     /**
-     * عرض قائمة بالدرجات
+     * عرض قائمة بالدرجات، مقيّدة حسب الدور:
+     * - الأدمن: كل الدرجات.
+     * - المعلم: درجات طلابه الفعليين فقط حسب جدوله.
+     * - الطالب: درجاته الخاصة فقط.
+     * - وليّ الأمر: درجات أبنائه فقط.
      */
-    public function index()
+    public function index(Request $request)
     {
-        $grades = Grade::with(['student.user', 'exam.subject', 'teacher.user'])->latest()->get();
+        $user = auth()->user();
+
+        $data = $request->validate([
+            'student_id' => 'nullable|exists:students,id',
+            'exam_id' => 'nullable|exists:exams,id',
+        ]);
+
+        $query = Grade::with(['student.user', 'exam.subject', 'teacher.user']);
+
+        if ($user->role === 'teacher') {
+            if (!$user->teacher) {
+                return response()->json(['error' => __('No teacher profile linked to your account.')], 403);
+            }
+
+            $query->whereIn('student_id', $user->teacher->scheduledStudents()->pluck('id'));
+        } elseif ($user->role === 'student') {
+            if (!$user->student) {
+                return response()->json(['error' => __('No student profile linked to your account.')], 403);
+            }
+
+            $query->where('student_id', $user->student->id);
+        } elseif ($user->role === 'parent') {
+            if (!$user->parent || $user->parent->status !== 'approved') {
+                return response()->json(['error' => __('Your account is pending approval or has been rejected.')], 403);
+            }
+
+            $query->whereIn('student_id', $user->parent->students()->pluck('id'));
+        } elseif ($user->role !== 'admin') {
+            return response()->json(['error' => __('Unauthorized')], 403);
+        }
+
+        if (!empty($data['student_id'])) {
+            $query->where('student_id', $data['student_id']);
+        }
+
+        if (!empty($data['exam_id'])) {
+            $query->where('exam_id', $data['exam_id']);
+        }
+
+        $grades = $query->latest()->get();
+
         return response()->json(['data' => $grades]);
     }
 
@@ -86,11 +130,29 @@ class GradeController extends Controller
     }
 
     /**
-     * عرض تفاصيل درجة معينة
+     * عرض تفاصيل درجة معينة (نفس تقييد index: صاحبها/وليّ أمره/معلمه الفعلي/الأدمن)
      */
     public function show(Grade $grade)
     {
         $grade->load(['student.user', 'exam.subject', 'teacher.user']);
+        $user = auth()->user();
+
+        $isAuthorized = match (true) {
+            $user->role === 'admin' => true,
+            $user->role === 'teacher' => (bool) ($user->teacher && $user->teacher->teaches($grade->student)),
+            $user->role === 'student' => (bool) ($user->student && $user->student->id === $grade->student_id),
+            $user->role === 'parent' => (bool) (
+                $user->parent
+                && $user->parent->status === 'approved'
+                && $grade->student->parent_id === $user->parent->id
+            ),
+            default => false,
+        };
+
+        if (!$isAuthorized) {
+            return response()->json(['error' => __('Unauthorized')], 403);
+        }
+
         return response()->json(['data' => $grade]);
     }
 
